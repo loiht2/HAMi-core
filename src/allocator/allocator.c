@@ -3,6 +3,103 @@
 #include "include/libcuda_hook.h"
 #include "multiprocess/multiprocess_memory_limit.h"
 
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <errno.h>
+
+/* --- Memory Resizer UDS Client --- */
+
+#define RESIZE_SOCKET_PATH "/var/run/hami/memory-resizer.sock"
+#define RESIZE_TIMEOUT_SEC 5
+#define RESIZE_INCREMENT   (512ULL * 1024 * 1024)  /* 512 MiB */
+#define RESIZE_PROTOCOL_VERSION 1
+
+/* Wire format: must match Go server exactly */
+typedef struct {
+    uint32_t version;              /* 0:4   */
+    int32_t  device_id;            /* 4:8   */
+    uint64_t current_usage;        /* 8:16  */
+    uint64_t current_limit;        /* 16:24 */
+    uint64_t requested_increase;   /* 24:32 */
+    char     cache_file[256];      /* 32:288 */
+} resize_request_t;
+
+typedef struct {
+    uint32_t status;     /* 0=resized, 1=denied, 2=error */
+    uint64_t new_limit;
+} resize_response_t;
+
+/*
+ * request_memory_resize: Contact the memory-resizer DaemonSet via UDS
+ * to request additional GPU memory for this container.
+ * Returns 0 on success (limit was increased), -1 on failure.
+ */
+static int request_memory_resize(int dev, uint64_t current_usage, uint64_t current_limit) {
+    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock < 0) {
+        LOG_ERROR("resize: socket() failed errno=%d", errno);
+        return -1;
+    }
+
+    /* Set send/recv timeout */
+    struct timeval tv;
+    tv.tv_sec = RESIZE_TIMEOUT_SEC;
+    tv.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, RESIZE_SOCKET_PATH, sizeof(addr.sun_path) - 1);
+
+    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        LOG_ERROR("resize: connect(%s) failed errno=%d", RESIZE_SOCKET_PATH, errno);
+        close(sock);
+        return -1;
+    }
+
+    /* Build request */
+    resize_request_t req;
+    memset(&req, 0, sizeof(req));
+    req.version = RESIZE_PROTOCOL_VERSION;
+    req.device_id = dev;
+    req.current_usage = current_usage;
+    req.current_limit = current_limit;
+    req.requested_increase = RESIZE_INCREMENT;
+
+    char* cache_env = getenv("CUDA_DEVICE_MEMORY_SHARED_CACHE");
+    if (cache_env != NULL) {
+        strncpy(req.cache_file, cache_env, sizeof(req.cache_file) - 1);
+    }
+
+    if (send(sock, &req, sizeof(req), 0) != sizeof(req)) {
+        LOG_ERROR("resize: send() failed errno=%d", errno);
+        close(sock);
+        return -1;
+    }
+
+    /* Receive response */
+    resize_response_t resp;
+    memset(&resp, 0, sizeof(resp));
+    ssize_t n = recv(sock, &resp, sizeof(resp), 0);
+    close(sock);
+
+    if (n != sizeof(resp)) {
+        LOG_ERROR("resize: recv() got %zd bytes, expected %zu, errno=%d", n, sizeof(resp), errno);
+        return -1;
+    }
+
+    if (resp.status == 0) {
+        LOG_INFO("resize: success, new_limit=%lu", resp.new_limit);
+        return 0;
+    }
+
+    LOG_WARN("resize: denied status=%u", resp.status);
+    return -1;
+}
+
+/* --- End Memory Resizer Client --- */
 
 size_t BITSIZE = 512;
 size_t IPCSIZE = 2097152;
@@ -53,7 +150,30 @@ int oom_check(const int dev, size_t addon) {
     size_t new_allocated = _usage + addon;
     LOG_INFO("_usage=%lu limit=%lu new_allocated=%lu",_usage,limit,new_allocated);
     if (new_allocated > limit) {
-        LOG_ERROR("Device %d OOM %lu / %lu", d, new_allocated, limit);
+        LOG_WARN("Device %d approaching OOM %lu / %lu, requesting resize",
+                 d, new_allocated, limit);
+
+        /* Keep requesting resizes until the limit is high enough or denied */
+        int max_attempts = 20;  /* safety cap: 20 * 512MiB = 10GiB max growth */
+        for (int attempt = 0; attempt < max_attempts; attempt++) {
+            uint64_t cur_limit = get_current_device_memory_limit(d);
+            if (new_allocated <= cur_limit) {
+                LOG_INFO("Device %d resize OK after %d attempt(s): limit=%lu usage=%lu",
+                         d, attempt, cur_limit, new_allocated);
+                return 0;  /* OOM avoided */
+            }
+            if (request_memory_resize(d, _usage, cur_limit) != 0) {
+                LOG_WARN("Device %d resize denied at attempt %d", d, attempt + 1);
+                break;
+            }
+        }
+
+        uint64_t final_limit = get_current_device_memory_limit(d);
+        if (new_allocated <= final_limit) {
+            return 0;  /* OOM avoided after loop */
+        }
+
+        LOG_ERROR("Device %d OOM %lu / %lu", d, new_allocated, final_limit);
 
         if (clear_proc_slot_nolock(1) > 0)
             return oom_check(dev,addon);
