@@ -11,6 +11,13 @@ build-in-docker:
 		-v $(current_dir):/libvgpu \
 		-w /libvgpu \
 		-e DEBIAN_FRONTEND=noninteractive \
-		nvidia/cuda:12.2.0-devel-ubuntu20.04 \
-		sh -c "apt-get -y update; apt-get -y install cmake; bash ./build.sh"
+		nvidia/cuda:12.9.1-cudnn-devel-ubuntu20.04 \
+		sh -c "apt-get -y update && \
+           apt-get -y install cmake git && \
+           git config --global --add safe.directory /libvgpu && \
+           bash ./build.sh"
 .PHONY: build-in-docker
+
+check-cuda-hook-consistency:
+	python3 hack/check_cuda_hook_consistency.py
+.PHONY: check-cuda-hook-consistency

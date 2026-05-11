@@ -12,42 +12,39 @@
 #include "multiprocess/multiprocess_memory_limit.h"
 
 const char* unified_lock="/tmp/vgpulock/lock";
-const int retry_count=20;
+static int lock_fd = -1;
 extern size_t context_size;
 extern int cuda_to_nvml_map_array[CUDA_DEVICE_MAX_COUNT];
 
 // 0 unified_lock lock success
 // -1 unified_lock lock fail
 int try_lock_unified_lock() {
-    // initialize the random number seed
-    srand(time(NULL));
-    int fd = open(unified_lock,O_CREAT | O_EXCL,S_IRWXU);
-    int cnt = 0;
-    while (fd == -1 && cnt <= retry_count) {
-        if (cnt == retry_count) {
-            LOG_MSG("unified_lock expired,removing...");
-            int res = remove(unified_lock);
-            LOG_MSG("remove unified_lock:%d",res);
-        }else{
-            LOG_MSG("unified_lock locked, waiting 1 second...");
-            sleep(rand()%5 + 1);
-        }
-        cnt++;
-        fd = open(unified_lock,O_CREAT | O_EXCL,S_IRWXU); 
+    lock_fd = open(unified_lock, O_CREAT | O_RDWR, 0666);
+    if (lock_fd == -1) {
+        LOG_ERROR("failed to open unified_lock file: %s", unified_lock);
+        return -1;
     }
-    LOG_INFO("try_lock_unified_lock:%d",fd);
-    if (fd != -1) {
-        close(fd);
-        return 0;
+    if (flock(lock_fd, LOCK_EX) == -1) {
+        LOG_ERROR("flock failed on unified_lock");
+        close(lock_fd);
+        lock_fd = -1;
+        return -1;
     }
-    return -1;
+    LOG_INFO("try_lock_unified_lock: acquired");
+    return 0;
 }
 
 // 0 unified_lock unlock success
 // -1 unified_lock unlock fail
 int try_unlock_unified_lock() {
-    int res = remove(unified_lock);
-    LOG_INFO("try unlock_unified_lock:%d",res);
+    if (lock_fd == -1) {
+        LOG_ERROR("try_unlock_unified_lock: no lock held");
+        return -1;
+    }
+    int res = flock(lock_fd, LOCK_UN);
+    close(lock_fd);
+    lock_fd = -1;
+    LOG_INFO("try unlock_unified_lock:%d", res);
     return res == 0 ? 0 : -1;
 }
 

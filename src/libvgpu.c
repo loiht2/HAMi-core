@@ -99,9 +99,12 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
         }
         if (real_dlsym == NULL) {
             LOG_ERROR("real dlsym not found");
-            real_dlsym = _dl_sym(RTLD_NEXT, "dlsym", dlsym);
+            void *libc_handle = dlopen("libc.so.6", RTLD_LAZY);
+            if (libc_handle) {
+                real_dlsym = dlsym(libc_handle, "dlsym");
+            }
             if (real_dlsym == NULL)
-                LOG_ERROR("real dlsym not found");
+                LOG_ERROR("real dlsym not found after trying libc.so.6");
         }
     }
     if (handle == RTLD_NEXT) {
@@ -152,8 +155,11 @@ void* __dlsym_hook_section(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(cuGetProcAddress_v2);
     //Context
     //DLSYM_HOOK_FUNC(cuCtxGetDevice);
+#if CUDA_VERSION < 13000
     DLSYM_HOOK_FUNC(cuCtxCreate_v2);
     DLSYM_HOOK_FUNC(cuCtxCreate_v3);
+#endif
+    DLSYM_HOOK_FUNC(cuCtxCreate_v4);
     DLSYM_HOOK_FUNC(cuDevicePrimaryCtxGetState);
     DLSYM_HOOK_FUNC(cuDevicePrimaryCtxRetain);
     DLSYM_HOOK_FUNC(cuDevicePrimaryCtxSetFlags_v2);
@@ -200,7 +206,6 @@ void* __dlsym_hook_section(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(cuCtxGetDevice);
     DLSYM_HOOK_FUNC(cuDeviceGetAttribute);
     DLSYM_HOOK_FUNC(cuDeviceGetCount);
-    DLSYM_HOOK_FUNC(cuDeviceGet);
     DLSYM_HOOK_FUNC(cuDeviceGetName);
     DLSYM_HOOK_FUNC(cuDeviceCanAccessPeer);
     DLSYM_HOOK_FUNC(cuDeviceGetP2PAttribute);
@@ -209,6 +214,7 @@ void* __dlsym_hook_section(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(cuDeviceGetDefaultMemPool);
     DLSYM_HOOK_FUNC(cuDeviceGetLuid);
     DLSYM_HOOK_FUNC(cuDeviceGetUuid);
+    DLSYM_HOOK_FUNC(cuDeviceGetUuid_v2);
     DLSYM_HOOK_FUNC(cuDeviceGetMemPool);
     DLSYM_HOOK_FUNC(cuDeviceTotalMem_v2);
     DLSYM_HOOK_FUNC(cuPointerGetAttributes);
@@ -231,7 +237,6 @@ void* __dlsym_hook_section(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(cuMemcpyAsync);
     DLSYM_HOOK_FUNC(cuMemcpyAtoD_v2);
     DLSYM_HOOK_FUNC(cuMemcpyDtoA_v2);
-    DLSYM_HOOK_FUNC(cuMemcpyDtoDAsync_v2);
     DLSYM_HOOK_FUNC(cuMemcpyDtoD_v2);
     DLSYM_HOOK_FUNC(cuMemcpyDtoDAsync_v2);
     DLSYM_HOOK_FUNC(cuMemcpyDtoH_v2);
@@ -251,6 +256,7 @@ void* __dlsym_hook_section(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(cuMemsetD8_v2);
     DLSYM_HOOK_FUNC(cuMemsetD8Async);
     DLSYM_HOOK_FUNC(cuMemAdvise);
+    DLSYM_HOOK_FUNC(cuMemAdvise_v2);
     DLSYM_HOOK_FUNC(cuEventCreate);
     DLSYM_HOOK_FUNC(cuEventDestroy_v2);
     DLSYM_HOOK_FUNC(cuModuleLoad);
@@ -273,6 +279,7 @@ void* __dlsym_hook_section(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(cuMemMap);
     DLSYM_HOOK_FUNC(cuMemImportFromShareableHandle);
     DLSYM_HOOK_FUNC(cuMemAllocAsync);
+    DLSYM_HOOK_FUNC(cuMemFreeAsync);
     // cuda 11.7 new memory ops
     DLSYM_HOOK_FUNC(cuMemHostGetDevicePointer_v2);
     DLSYM_HOOK_FUNC(cuMemHostGetFlags);
@@ -296,6 +303,7 @@ void* __dlsym_hook_section(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(cuMemcpy3DPeer);
     DLSYM_HOOK_FUNC(cuMemcpy3DPeerAsync);
     DLSYM_HOOK_FUNC(cuMemPrefetchAsync);
+    DLSYM_HOOK_FUNC(cuMemPrefetchAsync_v2);
     DLSYM_HOOK_FUNC(cuMemRangeGetAttribute);
     DLSYM_HOOK_FUNC(cuMemRangeGetAttributes);
     // cuda 11.7 external resource interoperability
@@ -344,10 +352,15 @@ void* __dlsym_hook_section(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(cuGraphGetNodes);
     DLSYM_HOOK_FUNC(cuGraphGetRootNodes);
     DLSYM_HOOK_FUNC(cuGraphGetEdges);
+    DLSYM_HOOK_FUNC(cuGraphGetEdges_v2);
     DLSYM_HOOK_FUNC(cuGraphNodeGetDependencies);
+    DLSYM_HOOK_FUNC(cuGraphNodeGetDependencies_v2);
     DLSYM_HOOK_FUNC(cuGraphNodeGetDependentNodes);
+    DLSYM_HOOK_FUNC(cuGraphNodeGetDependentNodes_v2);
     DLSYM_HOOK_FUNC(cuGraphAddDependencies);
+    DLSYM_HOOK_FUNC(cuGraphAddDependencies_v2);
     DLSYM_HOOK_FUNC(cuGraphRemoveDependencies);
+    DLSYM_HOOK_FUNC(cuGraphRemoveDependencies_v2);
     DLSYM_HOOK_FUNC(cuGraphDestroyNode);
     DLSYM_HOOK_FUNC(cuGraphInstantiate);
     DLSYM_HOOK_FUNC(cuGraphInstantiateWithFlags);
@@ -853,14 +866,18 @@ void* __dlsym_hook_section_nvml(void* handle, const char* symbol) {
 }
 
 void preInit(){
+    log_utils_init();
     LOG_MSG("Initializing.....");
     if (real_dlsym == NULL) {
         real_dlsym = dlvsym(RTLD_NEXT,"dlsym","GLIBC_2.2.5");
         if (real_dlsym == NULL) {
             LOG_ERROR("real dlsym not found");
-            real_dlsym = _dl_sym(RTLD_NEXT, "dlsym", dlsym);
-            if (real_dlsym == NULL)
+            void *libc_handle = dlopen("libc.so.6", RTLD_LAZY);
+            if (libc_handle) {
+                real_dlsym = dlsym(libc_handle, "dlsym");
+            } else {
                 LOG_ERROR("real dlsym not found");
+            }
         }
     }
     real_realpath = NULL;
@@ -872,15 +889,29 @@ void preInit(){
 void postInit(){
     allocator_init();
     map_cuda_visible_devices();
-    try_lock_unified_lock();
-    nvmlReturn_t res = set_task_pid();
-    try_unlock_unified_lock();
+
+    // Use shared memory semaphore to serialize host PID detection
+    // Returns 1 if lock acquired, 0 if timeout (skip detection)
+    int lock_acquired = lock_postinit();
+    nvmlReturn_t res = NVML_SUCCESS;
+
+    if (lock_acquired) {
+        // Lock acquired - safe to call set_task_pid()
+        res = set_task_pid();
+        unlock_postinit();
+    } else {
+        // Timeout - another process likely crashed holding the lock
+        // Skip host PID detection for this process
+        LOG_WARN("Skipped host PID detection due to lock timeout");
+        res = NVML_ERROR_TIMEOUT;
+    }
+
     LOG_MSG("Initialized");
-    if (res!=NVML_SUCCESS){
-        LOG_WARN("SET_TASK_PID FAILED.");
-        pidfound=0;
-    }else{
-        pidfound=1;
+    if (res != NVML_SUCCESS) {
+        LOG_WARN("SET_TASK_PID FAILED - using container PID for accounting");
+        pidfound = 0;
+    } else {
+        pidfound = 1;
     }
 
     //add_gpu_device_memory_usage(getpid(),0,context_size,0);

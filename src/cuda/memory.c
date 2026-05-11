@@ -160,13 +160,13 @@ CUresult cuMemAllocManaged(CUdeviceptr* dptr, size_t bytesize, unsigned int flag
     LOG_DEBUG("cuMemAllocManaged dptr=%p bytesize=%ld",dptr,bytesize);
     ENSURE_RUNNING();
     CUdevice dev;
-    CUDA_OVERRIDE_CALL(cuda_library_entry,cuCtxGetDevice,&dev);
+    CHECK_DRV_API(cuCtxGetDevice(&dev));
     if (oom_check(dev,bytesize)){
         return CUDA_ERROR_OUT_OF_MEMORY;
     }
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemAllocManaged, dptr, bytesize, flags);
     if (res == CUDA_SUCCESS) {
-        add_chunk_only(*dptr,bytesize);
+        add_chunk_only(*dptr, bytesize, dev);
     }
     return res;
 }
@@ -178,13 +178,13 @@ CUresult cuMemAllocPitch_v2(CUdeviceptr* dptr, size_t* pPitch, size_t WidthInByt
     size_t bytesize = guess_pitch * Height;
     ENSURE_RUNNING();
     CUdevice dev;
-    CUDA_OVERRIDE_CALL(cuda_library_entry,cuCtxGetDevice,&dev);
+    CHECK_DRV_API(cuCtxGetDevice(&dev));
     if (oom_check(dev,bytesize)){
         return CUDA_ERROR_OUT_OF_MEMORY;
     }
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemAllocPitch_v2, dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
     if (res == CUDA_SUCCESS) {
-        add_chunk_only(*dptr,bytesize);
+        add_chunk_only(*dptr, bytesize, dev);
     }
     return res;
 }
@@ -481,10 +481,21 @@ CUresult cuMemsetD8Async ( CUdeviceptr dstDevice, unsigned char  uc, size_t N, C
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemsetD8Async,dstDevice,uc,N,hStream);
 }
 
+#if CUDA_VERSION < 13000
 CUresult cuMemAdvise( CUdeviceptr devPtr, size_t count, CUmem_advise advice, CUdevice device ){
     LOG_DEBUG("cuMemAdvise devPtr=%llx count=%lx",devPtr,count);
     ENSURE_RUNNING();
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemAdvise,devPtr,count,advice,device);
+}
+#endif
+
+/* On CUDA 13+, cuda.h #defines cuMemAdvise as cuMemAdvise_v2 with a new CUmemLocation
+   parameter. The old CUdevice wrapper above would conflict, so it is excluded.
+   On CUDA 12 and below, both symbols exist separately and this is the explicit v2 wrapper. */
+CUresult cuMemAdvise_v2(CUdeviceptr devPtr, size_t count, CUmem_advise advice, CUmemLocation location) {
+    LOG_DEBUG("cuMemAdvise_v2 devPtr=%llx count=%lx", devPtr, count);
+    ENSURE_RUNNING();
+    return CUDA_OVERRIDE_CALL(cuda_library_entry, cuMemAdvise_v2, devPtr, count, advice, location);
 }
 
 #ifdef HOOK_MEMINFO_ENABLE
@@ -593,14 +604,17 @@ CUresult cuMemCreate ( CUmemGenericAllocationHandle* handle, size_t size, const 
     LOG_INFO("cuMemCreate:%lld:%d", size, prop->location.id);
     ENSURE_RUNNING();
     CUdevice dev;
-    CUDA_OVERRIDE_CALL(cuda_library_entry, cuCtxGetDevice, &dev);
-    if (oom_check(dev, size)) {
+    int do_oom_check = (prop->location.type == CU_MEM_LOCATION_TYPE_DEVICE);
+    if (do_oom_check && cuCtxGetDevice(&dev) != CUDA_SUCCESS) {
+        dev = prop->location.id;
+    }
+    if (do_oom_check && oom_check(dev, size)) {
         return CUDA_ERROR_OUT_OF_MEMORY;
     }
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,
         cuMemCreate, handle, size, prop, flags);
     if (res == CUDA_SUCCESS) {
-        add_chunk_only(*handle, size);
+        add_chunk_only(*handle, size, dev);
     }
     return res;
 }
@@ -780,9 +794,17 @@ CUresult cuMemcpy3DPeerAsync(const CUDA_MEMCPY3D_PEER *pCopy, CUstream hStream) 
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemcpy3DPeerAsync,pCopy,hStream);
 }
 
+#if CUDA_VERSION < 13000
 CUresult cuMemPrefetchAsync(CUdeviceptr devPtr, size_t count, CUdevice dstDevice, CUstream hStream) {
     LOG_DEBUG("cuMemPrefetchAsync");
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemPrefetchAsync,devPtr,count,dstDevice,hStream);
+}
+#endif
+
+CUresult cuMemPrefetchAsync_v2(CUdeviceptr devPtr, size_t count, CUmemLocation location, unsigned int flags,
+                               CUstream hStream) {
+    LOG_DEBUG("cuMemPrefetchAsync_v2");
+    return CUDA_OVERRIDE_CALL(cuda_library_entry, cuMemPrefetchAsync_v2, devPtr, count, location, flags, hStream);
 }
 
 CUresult cuMemRangeGetAttribute(void *data, size_t dataSize, CUmem_range_attribute attribute, CUdeviceptr devPtr, size_t count) {
